@@ -174,9 +174,9 @@ int main(int argc, char *argv[]) {
   td::OptionParser options;
   bool need_print_usage = false;
   bool need_print_version = false;
-  int http_port = 8081;
+  td::vector<std::pair<td::string, int>> http_servers;  // (ip_address, port) pairs
+  td::string pending_http_ip_address = "0.0.0.0";
   int http_stat_port = 0;
-  td::string http_ip_address = "0.0.0.0";
   td::string http_stat_ip_address = "0.0.0.0";
   td::string log_file_path;
   int default_verbosity_level = 0;
@@ -219,8 +219,18 @@ int main(int argc, char *argv[]) {
                      "application identifier hash for Telegram API access, which can be obtained at "
                      "https://my.telegram.org (defaults to the value of the TELEGRAM_API_HASH environment variable)",
                      td::OptionParser::parse_string(parameters->api_hash_));
-  options.add_checked_option('p', "http-port", PSLICE() << "HTTP listening port (default is " << http_port << ")",
-                             td::OptionParser::parse_integer(http_port));
+  options.add_checked_option('p', "http-port",
+                             "HTTP listening port; may be specified multiple times to listen on multiple ports "
+                             "(default is 8081)",
+                             [&](td::Slice port_str) {
+                               TRY_RESULT(port, td::to_integer_safe<int>(port_str));
+                               if (port <= 0 || port > 65535) {
+                                 return td::Status::Error("Wrong HTTP port number specified");
+                               }
+                               http_servers.emplace_back(pending_http_ip_address, port);
+                               pending_http_ip_address = "0.0.0.0";
+                               return td::Status::OK();
+                             });
   options.add_checked_option('s', "http-stat-port", "HTTP statistics port",
                              td::OptionParser::parse_integer(http_stat_port));
   options.add_option('d', "dir", "server working directory", td::OptionParser::parse_string(working_directory));
@@ -244,11 +254,11 @@ int main(int argc, char *argv[]) {
                              "default value of the maximum webhook connections per bot",
                              td::OptionParser::parse_integer(parameters->default_max_webhook_connections_));
   options.add_checked_option('\0', "http-ip-address",
-                             "local IP address, HTTP connections to which will be accepted. By default, connections to "
-                             "any local IPv4 address are accepted",
+                             "local IP address for the next --http-port to bind to; may be specified before each "
+                             "--http-port. By default, connections to any local IPv4 address are accepted",
                              [&](td::Slice ip_address) {
                                TRY_STATUS(td::IPAddress::get_ip_address(ip_address.str()));
-                               http_ip_address = ip_address.str();
+                               pending_http_ip_address = ip_address.str();
                                return td::Status::OK();
                              });
   options.add_checked_option('\0', "http-stat-ip-address",
@@ -329,6 +339,10 @@ int main(int argc, char *argv[]) {
     LOG(PLAIN) << argv[0] << ": " << r_non_options.error().message();
     LOG(PLAIN) << options;
     return 1;
+  }
+
+  if (http_servers.empty()) {
+    http_servers.emplace_back(pending_http_ip_address, 8081);
   }
 
   td::CombinedLog log;
@@ -472,14 +486,17 @@ int main(int argc, char *argv[]) {
                                                                 std::move(parameters), token_range)
                             .release();
 
-  sched
-      .create_actor_unsafe<HttpServer>(
-          SharedData::get_client_scheduler_id(), "HttpServer", http_ip_address, http_port,
-          [client_manager, shared_data] {
-            return td::ActorOwn<td::HttpInboundConnection::Callback>(
-                td::create_actor<HttpConnection>("HttpConnection", client_manager, shared_data));
-          })
-      .release();
+  for (std::size_t i = 0; i < http_servers.size(); i++) {
+    const auto &server = http_servers[i];
+    sched
+        .create_actor_unsafe<HttpServer>(
+            SharedData::get_client_scheduler_id(), PSTRING() << "HttpServer" << i, server.first, server.second,
+            [client_manager, shared_data] {
+              return td::ActorOwn<td::HttpInboundConnection::Callback>(
+                  td::create_actor<HttpConnection>("HttpConnection", client_manager, shared_data));
+            })
+        .release();
+  }
 
   if (http_stat_port != 0) {
     sched
