@@ -176,6 +176,7 @@ int main(int argc, char *argv[]) {
   bool need_print_version = false;
   td::vector<std::pair<td::string, int>> http_servers;  // (ip_address, port) pairs
   td::string pending_http_ip_address = "0.0.0.0";
+  bool pending_http_ip_address_set = false;
   int http_stat_port = 0;
   td::string http_stat_ip_address = "0.0.0.0";
   td::string log_file_path;
@@ -229,6 +230,7 @@ int main(int argc, char *argv[]) {
                                }
                                http_servers.emplace_back(pending_http_ip_address, port);
                                pending_http_ip_address = "0.0.0.0";
+                               pending_http_ip_address_set = false;
                                return td::Status::OK();
                              });
   options.add_checked_option('s', "http-stat-port", "HTTP statistics port",
@@ -259,6 +261,7 @@ int main(int argc, char *argv[]) {
                              [&](td::Slice ip_address) {
                                TRY_STATUS(td::IPAddress::get_ip_address(ip_address.str()));
                                pending_http_ip_address = ip_address.str();
+                               pending_http_ip_address_set = true;
                                return td::Status::OK();
                              });
   options.add_checked_option('\0', "http-stat-ip-address",
@@ -343,6 +346,10 @@ int main(int argc, char *argv[]) {
 
   if (http_servers.empty()) {
     http_servers.emplace_back(pending_http_ip_address, 8081);
+  } else if (pending_http_ip_address_set) {
+    LOG(PLAIN) << argv[0] << ": --http-ip-address must be followed by --http-port";
+    LOG(PLAIN) << options;
+    return 1;
   }
 
   td::CombinedLog log;
